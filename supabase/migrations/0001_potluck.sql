@@ -144,6 +144,9 @@ begin
   if p_owner is null then
     raise exception 'owner_required';
   end if;
+  if nullif(btrim(coalesce(p_name, '')), '') is null then
+    raise exception 'name_required';
+  end if;
 
   insert into public.dishes (name, category, servings, brought_by, owner_id)
   values (
@@ -319,6 +322,12 @@ $$;
 -- ---------------------------------------------------------------------------
 
 revoke execute on all functions in schema public from public, anon, authenticated;
+
+-- Seal the private schema outright (Supabase's default privileges are
+-- permissive; none of this must ever be reachable through the API roles).
+revoke all on schema private from public;
+revoke all on all tables in schema private from public, anon, authenticated;
+revoke execute on all functions in schema private from public, anon, authenticated;
 
 grant execute on function
   public.list_dishes(uuid),
