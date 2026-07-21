@@ -1,239 +1,316 @@
+// End-to-end walkthrough of the potluck platform against the production build
+// and a local replica of the production architecture (real Postgres + the real
+// migrations behind a PostgREST-protocol shim — see setup-local.sh/rest-shim.mjs).
+//
+// Two persistent browser contexts simulate two devices: the HOST (signs up,
+// stays signed in) and a GUEST who only ever has the share link. Tests are
+// serial and share state, walking one potluck through its whole life.
 import { expect, test, type BrowserContext, type Page } from '@playwright/test'
 
-// Full product walkthrough against the production build + real Postgres/
-// PostgREST. Two browser contexts simulate two devices (distinct localStorage
-// owner ids). Tests are serial and share state.
+const REST = 'http://127.0.0.1:3002/rest/v1'
+const HEADERS = { apikey: 'test', authorization: 'Bearer test', 'content-type': 'application/json' }
 
-const SUPABASE = 'http://127.0.0.1:3002'
-const ANON_JWT =
-  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoiYW5vbiJ9.MVPNNyBwd2n2FlEi424lOLPT0Z2W34D0wpiC6P_VZAg'
-const HOST_SECRET = 'test-host-secret'
-
-const rpcHeaders = {
-  'content-type': 'application/json',
-  apikey: ANON_JWT,
-  authorization: `Bearer ${ANON_JWT}`,
-}
-
-const dishCard = (page: Page, name: string) =>
-  page.getByTestId('dish-card').filter({ hasText: name })
+const HOST = { name: 'Dana Host', email: 'dana@example.com', password: 'super-secret-1' }
 
 test.describe.configure({ mode: 'serial' })
 
-let contextA: BrowserContext
-let contextB: BrowserContext
-let pageA: Page
-let pageB: Page
+let hostContext: BrowserContext
+let guestContext: BrowserContext
+let host: Page
+let guest: Page
+let shareUrl: string
 
 test.beforeAll(async ({ browser }) => {
-  contextA = await browser.newContext()
-  contextB = await browser.newContext()
-  pageA = await contextA.newPage()
-  pageB = await contextB.newPage()
+  hostContext = await browser.newContext()
+  guestContext = await browser.newContext()
+  host = await hostContext.newPage()
+  guest = await guestContext.newPage()
 })
 
 test.afterAll(async () => {
-  await contextA.close()
-  await contextB.close()
+  await hostContext.close()
+  await guestContext.close()
 })
 
-test('device A adds a claimed and an unclaimed dish', async () => {
-  await pageA.goto('/')
-  await expect(pageA.getByText('No dishes yet')).toBeVisible()
+async function addDish(
+  page: Page,
+  dish: { name: string; category?: string; servings: number; broughtBy?: string },
+) {
+  await page.getByRole('button', { name: 'Add a dish' }).click()
+  await page.getByLabel('Dish', { exact: true }).fill(dish.name)
+  if (dish.category) {
+    await page.getByLabel('Category').click()
+    await page.getByRole('option', { name: dish.category, exact: true }).click()
+  }
+  await page.getByLabel('Servings').fill(String(dish.servings))
+  if (dish.broughtBy) {
+    await page.getByLabel(/Who's bringing it/).fill(dish.broughtBy)
+  }
+  await page.getByRole('button', { name: /Add dish/ }).click()
+  await expect(page.getByRole('dialog')).toBeHidden()
+}
 
-  await pageA.getByRole('button', { name: 'Add a dish' }).click()
-  await pageA.getByLabel('Dish', { exact: true }).fill('Mac and Cheese')
-  await pageA.getByLabel('Servings').fill('8')
-  await pageA.getByLabel("Who's bringing it? (optional)").fill('Aakar')
-  await pageA.getByRole('button', { name: 'Add dish' }).click()
-
-  await expect(pageA.getByText('Added Mac and Cheese')).toBeVisible()
-  await expect(pageA.getByText('Serves 8')).toBeVisible()
-  await expect(pageA.getByText('Brought by')).toBeVisible()
-  await expect(pageA.getByText('Aakar', { exact: true })).toBeVisible()
-
-  await pageA.getByRole('button', { name: 'Add a dish' }).click()
-  await pageA.getByLabel('Dish', { exact: true }).fill('Garden Salad')
-  await pageA.getByLabel('Category').click()
-  await pageA.getByRole('option', { name: 'Side' }).click()
-  await pageA.getByLabel('Servings').fill('6')
-  await pageA.getByRole('button', { name: 'Add dish' }).click()
-
-  await expect(pageA.getByText('Up for grabs', { exact: true })).toBeVisible()
-  await expect(pageA.getByRole('button', { name: 'Claim', exact: true })).toBeVisible()
-
-  // A owns both dishes, so edit/delete controls are visible.
-  await expect(pageA.getByRole('button', { name: 'Edit Mac and Cheese' })).toBeVisible()
-  await expect(pageA.getByRole('button', { name: 'Delete Garden Salad' })).toBeVisible()
-})
-
-test('device B sees the dishes but has no edit rights, then claims the salad', async () => {
-  await pageB.goto('/')
-  await expect(dishCard(pageB, 'Mac and Cheese')).toBeVisible()
-  await expect(dishCard(pageB, 'Garden Salad')).toBeVisible()
-
-  // Not B's dishes — no management controls.
-  await expect(pageB.getByRole('button', { name: 'Edit Mac and Cheese' })).toHaveCount(0)
-  await expect(pageB.getByRole('button', { name: 'Delete Mac and Cheese' })).toHaveCount(0)
-
-  await pageB.getByRole('button', { name: 'Claim', exact: true }).click()
-  await expect(pageB.getByRole('heading', { name: 'Claim Garden Salad' })).toBeVisible()
-  await pageB.getByLabel('Your name').fill('Priya')
-  await pageB.getByRole('button', { name: 'Claim dish' }).click()
-
-  await expect(pageB.getByText('Priya is bringing Garden Salad')).toBeVisible()
-  await expect(pageB.getByText('Priya', { exact: true })).toBeVisible()
-
-  // Device A sees the claim arrive via live polling, no reload.
-  await expect(pageA.getByText('Priya', { exact: true })).toBeVisible({ timeout: 10_000 })
-  await expect(pageA.getByText('Up for grabs')).toHaveCount(0)
-})
-
-test('device A edits its own dish', async () => {
-  await pageA.getByRole('button', { name: 'Edit Mac and Cheese' }).click()
-  await pageA.getByLabel('Servings').fill('12')
-  await pageA.getByRole('button', { name: 'Save changes' }).click()
-  await expect(pageA.getByText('Dish updated')).toBeVisible()
-  await expect(pageA.getByText('Serves 12')).toBeVisible()
-})
-
-test('filter chips narrow the list', async () => {
-  await pageA.getByRole('button', { name: 'Sides' }).click()
-  await expect(dishCard(pageA, 'Garden Salad')).toBeVisible()
-  await expect(dishCard(pageA, 'Mac and Cheese')).toHaveCount(0)
-
-  await pageA.getByRole('button', { name: 'Unclaimed' }).click()
-  await expect(pageA.getByText('No dishes match this filter.')).toBeVisible()
-
-  await pageA.getByRole('button', { name: 'All', exact: true }).click()
-  await expect(dishCard(pageA, 'Mac and Cheese')).toBeVisible()
-  await expect(dishCard(pageA, 'Garden Salad')).toBeVisible()
-})
-
-test('dashboard shows totals, editable guest count, and color-coded coverage', async () => {
-  await pageA.getByRole('tab', { name: 'Dashboard' }).click()
-
-  await expect(pageA.getByTestId('stat-total-items').getByText('2', { exact: true })).toBeVisible()
+test('landing page pitches the product and routes to signup', async ({ page }) => {
+  await page.goto('/')
   await expect(
-    pageA.getByTestId('stat-total-servings').getByText('18', { exact: true }),
+    page.getByRole('heading', { name: /Plan the whole table with one link/ }),
   ).toBeVisible()
-
-  // 18 servings for 24 guests -> 75%, 6 short.
-  await pageA.getByRole('button', { name: 'Edit guest count' }).click()
-  await pageA.getByTestId('stat-guest-count').getByRole('spinbutton').fill('24')
-  await pageA.getByRole('button', { name: 'Save guest count' }).click()
-  await expect(pageA.getByText('Guest count updated')).toBeVisible()
-  await expect(pageA.getByTestId('stat-coverage').getByText('75%')).toBeVisible()
-  await expect(pageA.getByText('6 servings short')).toBeVisible()
-
-  // 18 servings for 9 guests -> 200%, fully covered.
-  await pageA.getByRole('button', { name: 'Edit guest count' }).click()
-  await pageA.getByTestId('stat-guest-count').getByRole('spinbutton').fill('9')
-  await pageA.getByRole('button', { name: 'Save guest count' }).click()
-  await expect(pageA.getByTestId('stat-coverage').getByText('200%')).toBeVisible()
-  await expect(pageA.getByText("Everyone's covered")).toBeVisible()
-
-  // Category breakdown reflects the two dishes.
-  await expect(pageA.getByText('1 item · 12 servings')).toBeVisible()
-  await expect(pageA.getByText('1 item · 6 servings')).toBeVisible()
-
-  await pageA.getByRole('tab', { name: 'Tracker' }).click()
+  await expect(page.getByText('Guests skip the signup')).toBeVisible()
+  await page.getByRole('link', { name: /Host a potluck/ }).click()
+  await expect(page).toHaveURL('/signup')
+  await expect(page.getByRole('button', { name: 'Create account' })).toBeVisible()
 })
 
-test('guest count syncs to the other device', async () => {
-  await pageB.getByRole('tab', { name: 'Dashboard' }).click()
-  await expect(pageB.getByTestId('stat-guest-count').getByText('9', { exact: true })).toBeVisible({
-    timeout: 10_000,
+test('visiting the dashboard signed out redirects to sign in', async ({ page }) => {
+  await page.goto('/dashboard')
+  await expect(page).toHaveURL('/signin')
+})
+
+test('host signs up, creates a potluck, and gets a share link', async () => {
+  await host.goto('/signup')
+  await host.getByLabel('Your name').fill(HOST.name)
+  await host.getByLabel('Email').fill(HOST.email)
+  await host.getByLabel('Password').fill(HOST.password)
+  await host.getByRole('button', { name: 'Create account' }).click()
+  await expect(host).toHaveURL('/dashboard')
+  await expect(host.getByText('No potlucks yet')).toBeVisible()
+
+  await host.getByRole('button', { name: 'New potluck' }).first().click()
+  await host.getByLabel('Name').fill('Friendsgiving 2026')
+  await host.getByLabel('Date (optional)').fill('2026-11-21')
+  await host.getByLabel('Guests expected').fill('25')
+  await host.getByLabel('Location (optional)').fill("Dana's place")
+  await host.getByLabel(/Notes for guests/).fill('Oven access is limited.')
+  await host.getByRole('button', { name: 'Create potluck' }).click()
+
+  await expect(host).toHaveURL(/\/p\/[a-z0-9]{12}$/)
+  shareUrl = host.url()
+
+  await expect(host.getByRole('heading', { name: 'Friendsgiving 2026' })).toBeVisible()
+  await expect(host.getByText("Dana's place")).toBeVisible()
+  await expect(host.getByText('Oven access is limited.')).toBeVisible()
+  await expect(host.getByText('Host', { exact: true })).toBeVisible()
+})
+
+test('host adds dishes; the tracker reflects them', async () => {
+  await addDish(host, { name: 'Roast turkey', category: 'Main', servings: 12, broughtBy: 'Dana' })
+  await addDish(host, { name: 'Something green', category: 'Side', servings: 8 })
+
+  await expect(host.getByTestId('dish-card')).toHaveCount(2)
+  await expect(host.getByText('Up for grabs')).toBeVisible()
+  await expect(host.getByText('Unclaimed (1)')).toBeVisible()
+})
+
+test('guest opens the share link with no login wall and no admin controls', async () => {
+  await guest.goto(shareUrl)
+  await expect(guest.getByRole('heading', { name: 'Friendsgiving 2026' })).toBeVisible()
+  await expect(guest.getByTestId('dish-card')).toHaveCount(2)
+  // No host affordances for guests:
+  await expect(guest.getByText('Host', { exact: true })).toBeHidden()
+  await expect(guest.getByLabel('Edit potluck details')).toBeHidden()
+  await expect(guest.getByLabel('Delete potluck')).toBeHidden()
+  // Cannot edit the host's dishes either:
+  await expect(guest.getByLabel('Edit Roast turkey')).toBeHidden()
+})
+
+test('guest claims the unclaimed dish; the host sees it live', async () => {
+  await guest.getByRole('button', { name: 'Claim', exact: true }).click()
+  await guest.getByLabel('Your name').fill('Priya')
+  await guest.getByRole('button', { name: 'Claim dish' }).click()
+  await expect(guest.getByText('Brought by Priya')).toBeVisible()
+
+  // Live polling carries the claim to the host without a reload.
+  await expect(host.getByText('Brought by Priya')).toBeVisible()
+})
+
+test('guest adds their own dish and can edit only that one', async () => {
+  await addDish(guest, { name: 'Mango lassi', category: 'Drink', servings: 10, broughtBy: 'Priya' })
+
+  await expect(guest.getByLabel('Edit Mango lassi')).toBeVisible()
+  await expect(guest.getByLabel('Edit Roast turkey')).toBeHidden()
+})
+
+test('overview shows live coverage; guests cannot edit the guest count', async () => {
+  await guest.getByRole('tab', { name: 'Overview' }).click()
+  await expect(guest.getByTestId('stat-total-items')).toContainText('3')
+  await expect(guest.getByTestId('stat-total-servings')).toContainText('30')
+  await expect(guest.getByTestId('stat-guest-count')).toContainText('25')
+  await expect(guest.getByTestId('stat-coverage')).toContainText('120%')
+  await expect(guest.getByLabel('Edit guest count')).toBeHidden()
+  await guest.getByRole('tab', { name: 'Tracker' }).click()
+})
+
+test('host edits the guest dish (admin override) and adjusts the headcount', async () => {
+  await host.getByLabel('Edit Mango lassi').click()
+  await host.getByLabel('Servings').fill('12')
+  await host.getByRole('button', { name: 'Save changes' }).click()
+  await expect(host.getByRole('dialog')).toBeHidden()
+  await expect(
+    host.getByTestId('dish-card').filter({ hasText: 'Mango lassi' }),
+  ).toContainText('Serves 12')
+
+  await host.getByRole('tab', { name: 'Overview' }).click()
+  await host.getByLabel('Edit guest count').click()
+  await host.getByRole('spinbutton').fill('40')
+  await host.getByLabel('Save guest count').click()
+  await expect(host.getByTestId('stat-guest-count')).toContainText('40')
+  // 12 + 8 + 12 = 32 servings for 40 guests
+  await expect(host.getByTestId('stat-coverage')).toContainText('80%')
+
+  // The guest's poll picks up the new headcount.
+  await guest.getByRole('tab', { name: 'Overview' }).click()
+  await expect(guest.getByTestId('stat-guest-count')).toContainText('40')
+  await guest.getByRole('tab', { name: 'Tracker' }).click()
+  await host.getByRole('tab', { name: 'Tracker' }).click()
+})
+
+test('host edits event details and the guest sees them live', async () => {
+  await host.getByLabel('Edit potluck details').click()
+  await host.getByLabel('Name').fill('Friendsgiving: Final Form')
+  await host.getByLabel(/Notes for guests/).fill('')
+  await host.getByRole('button', { name: 'Save changes' }).click()
+  await expect(host.getByRole('dialog')).toBeHidden()
+
+  await expect(guest.getByRole('heading', { name: 'Friendsgiving: Final Form' })).toBeVisible()
+  await expect(guest.getByText('Oven access is limited.')).toBeHidden()
+})
+
+test('rotating the share link locks out the old link', async () => {
+  await host.getByLabel('Rotate share link').click()
+  await host.getByRole('alertdialog').getByRole('button', { name: 'Rotate link' }).click()
+  await expect(host).not.toHaveURL(shareUrl)
+  const newUrl = host.url()
+  expect(newUrl).toMatch(/\/p\/[a-z0-9]{12}$/)
+
+  // Old capability is dead for the guest…
+  await guest.goto(shareUrl)
+  await expect(guest.getByText("This potluck doesn't exist")).toBeVisible()
+  // …until the host shares the fresh one.
+  await guest.goto(newUrl)
+  await expect(guest.getByRole('heading', { name: 'Friendsgiving: Final Form' })).toBeVisible()
+  shareUrl = newUrl
+})
+
+test('dashboard summarizes the potluck and survives sign out/in', async () => {
+  await host.goto('/dashboard')
+  const card = host.getByTestId('event-card')
+  await expect(card).toHaveCount(1)
+  await expect(card).toContainText('Friendsgiving: Final Form')
+  await expect(card).toContainText('3 dishes')
+  await expect(card).toContainText('32 servings')
+  await expect(card).toContainText('80% covered')
+
+  await host.getByRole('button', { name: 'Sign out' }).click()
+  await expect(host).toHaveURL('/')
+  await host.goto('/dashboard')
+  await expect(host).toHaveURL('/signin')
+
+  await host.getByLabel('Email').fill(HOST.email)
+  await host.getByLabel('Password').fill(HOST.password)
+  await host.getByRole('button', { name: 'Sign in' }).click()
+  await expect(host).toHaveURL('/dashboard')
+  await expect(host.getByTestId('event-card')).toHaveCount(1)
+})
+
+test('wrong credentials are rejected with friendly copy', async ({ page }) => {
+  await page.goto('/signin')
+  await page.getByLabel('Email').fill(HOST.email)
+  await page.getByLabel('Password').fill('not-the-password')
+  await page.getByRole('button', { name: 'Sign in' }).click()
+  await expect(page.getByText('Wrong email or password.')).toBeVisible()
+})
+
+test('a bogus share link shows the not-found page', async ({ page }) => {
+  await page.goto('/p/zzzzzzzzzzzz')
+  await expect(page.getByText("This potluck doesn't exist")).toBeVisible()
+})
+
+test('deleting the potluck removes it for everyone', async () => {
+  await host.goto(shareUrl)
+  await host.getByLabel('Delete potluck').click()
+  await host.getByRole('alertdialog').getByRole('button', { name: 'Delete potluck' }).click()
+  await expect(host).toHaveURL('/dashboard')
+  await expect(host.getByText('No potlucks yet')).toBeVisible()
+
+  await guest.goto(shareUrl)
+  await expect(guest.getByText("This potluck doesn't exist")).toBeVisible()
+})
+
+test.describe('API hardening (wire-level probes)', () => {
+  test('tables are sealed off from the API roles', async ({ request }) => {
+    for (const table of ['events', 'dishes', 'users', 'sessions']) {
+      const res = await request.get(`${REST}/${table}`, { headers: HEADERS })
+      expect(res.status(), table).toBeGreaterThanOrEqual(400)
+    }
   })
-  await pageB.getByRole('tab', { name: 'Tracker' }).click()
-})
 
-test('an invalid host link is rejected', async () => {
-  await pageB.goto('/?host=wrong-secret')
-  await expect(pageB.getByText("That host link isn't valid.")).toBeVisible()
-  await expect(pageB.getByText('Host', { exact: true })).toHaveCount(0)
-})
+  test('admin RPCs reject missing or garbage session tokens', async ({ request }) => {
+    const create = await request.post(`${REST}/rpc/potluck_create_event`, {
+      headers: HEADERS,
+      data: { p_token: 'garbage', p_name: 'Intruder Party' },
+    })
+    expect(create.status()).toBe(400)
+    expect((await create.json()).message).toBe('not_signed_in')
 
-test('host mode grants edit rights on every dish and strips the URL param', async () => {
-  await pageB.goto(`/?host=${HOST_SECRET}`)
-  await expect(pageB.getByText('Host mode on — you can edit every dish')).toBeVisible()
-  await expect(pageB.getByText('Host', { exact: true })).toBeVisible()
-  expect(pageB.url()).not.toContain('host=')
-
-  // B can now manage A's dish: delete Garden Salad with confirmation.
-  await expect(pageB.getByRole('button', { name: 'Edit Mac and Cheese' })).toBeVisible()
-  await pageB.getByRole('button', { name: 'Delete Garden Salad' }).click()
-  await expect(pageB.getByRole('heading', { name: 'Delete Garden Salad?' })).toBeVisible()
-  await pageB.getByRole('button', { name: 'Delete', exact: true }).click()
-  await expect(pageB.getByText('Dish removed')).toBeVisible()
-  await expect(dishCard(pageB, 'Garden Salad')).toHaveCount(0)
-
-  // A sees the deletion via polling.
-  await expect(dishCard(pageA, 'Garden Salad')).toHaveCount(0, { timeout: 10_000 })
-
-  // Exiting host mode drops the extra powers.
-  await pageB.getByRole('button', { name: 'Exit host mode' }).click()
-  await expect(pageB.getByText('Left host mode')).toBeVisible()
-  await expect(pageB.getByRole('button', { name: 'Edit Mac and Cheese' })).toHaveCount(0)
-})
-
-test('deleting the last dish returns to the empty state', async () => {
-  await pageA.getByRole('button', { name: 'Delete Mac and Cheese' }).click()
-  await pageA.getByRole('button', { name: 'Delete', exact: true }).click()
-  await expect(pageA.getByText('No dishes yet')).toBeVisible()
-})
-
-test('API hardening: tables are sealed and ownership is enforced server-side', async ({
-  request,
-}) => {
-  // Direct table access with the anon key must be denied (RLS deny-all).
-  const tableRead = await request.get(`${SUPABASE}/rest/v1/dishes`, { headers: rpcHeaders })
-  expect(tableRead.status()).toBeGreaterThanOrEqual(400)
-
-  const rpc = async (fn: string, args: Record<string, unknown>) =>
-    request.post(`${SUPABASE}/rest/v1/rpc/${fn}`, { headers: rpcHeaders, data: args })
-
-  // Create a dish as owner X.
-  const ownerX = crypto.randomUUID()
-  const ownerY = crypto.randomUUID()
-  const created = await rpc('create_dish', {
-    p_owner: ownerX,
-    p_name: 'Probe Dish',
-    p_category: 'other',
-    p_servings: 4,
-    p_brought_by: 'X',
+    const events = await request.post(`${REST}/rpc/potluck_my_events`, {
+      headers: HEADERS,
+      data: { p_token: null },
+    })
+    expect(events.status()).toBe(400)
   })
-  expect(created.ok()).toBe(true)
-  const dish = await created.json()
 
-  // The payload computes `mine` but never exposes the owner id.
-  expect(dish.mine).toBe(true)
-  expect(JSON.stringify(dish)).not.toContain(ownerX)
+  test('payloads never leak owner ids, host ids, or password material', async ({ request }) => {
+    const session = await request.post(`${REST}/rpc/potluck_sign_up`, {
+      headers: HEADERS,
+      data: { p_email: 'probe@example.com', p_password: 'probe-pass-1', p_name: 'Probe' },
+    })
+    expect(session.status()).toBe(200)
+    const { token } = await session.json()
 
-  // list_dishes as Y: dish visible, not mine, owner id absent.
-  const listed = await (await rpc('list_dishes', { p_owner: ownerY })).json()
-  const probe = listed.find((d: { id: string }) => d.id === dish.id)
-  expect(probe.mine).toBe(false)
-  expect(JSON.stringify(listed)).not.toContain(ownerX)
+    const event = await request.post(`${REST}/rpc/potluck_create_event`, {
+      headers: HEADERS,
+      data: { p_token: token, p_name: 'Leak Check' },
+    })
+    const slug = (await event.json()).slug
 
-  // Y cannot edit or delete X's dish.
-  const patch = await rpc('update_dish', { p_id: dish.id, p_owner: ownerY, p_name: 'Hijacked' })
-  expect(patch.status()).toBe(400)
-  expect((await patch.json()).message).toBe('not_allowed')
+    const data = await request.post(`${REST}/rpc/potluck_get_event`, {
+      headers: HEADERS,
+      data: { p_slug: slug, p_owner: crypto.randomUUID(), p_token: null },
+    })
+    const body = JSON.stringify(await data.json())
+    for (const needle of ['owner_id', 'host_user_id', 'password', 'token_hash', 'email']) {
+      expect(body, `payload must not contain ${needle}`).not.toContain(needle)
+    }
+  })
 
-  const del = await rpc('delete_dish', { p_id: dish.id, p_owner: ownerY })
-  expect(del.status()).toBe(400)
-  expect((await del.json()).message).toBe('not_allowed')
+  test('nobody can mutate someone else’s dish at the wire level', async ({ request }) => {
+    const session = await request.post(`${REST}/rpc/potluck_sign_in`, {
+      headers: HEADERS,
+      data: { p_email: 'probe@example.com', p_password: 'probe-pass-1' },
+    })
+    const { token } = await session.json()
+    const event = await request.post(`${REST}/rpc/potluck_create_event`, {
+      headers: HEADERS,
+      data: { p_token: token, p_name: 'Wire Party' },
+    })
+    const slug = (await event.json()).slug
+    const dish = await request.post(`${REST}/rpc/potluck_create_dish`, {
+      headers: HEADERS,
+      data: {
+        p_slug: slug,
+        p_owner: crypto.randomUUID(),
+        p_name: 'Locked Dish',
+        p_category: 'main',
+        p_servings: 4,
+      },
+    })
+    const dishId = (await dish.json()).id
 
-  // Claiming an already-claimed dish is rejected.
-  const claim = await rpc('claim_dish', { p_id: dish.id, p_owner: ownerY, p_name: 'Y' })
-  expect((await claim.json()).message).toBe('already_claimed')
-
-  // The host secret unlocks the same operations.
-  const hostDel = await rpc('delete_dish', { p_id: dish.id, p_owner: ownerY, p_host: HOST_SECRET })
-  expect(hostDel.ok()).toBe(true)
-
-  // Settings guardrail.
-  const badCount = await rpc('set_guest_count', { p_count: -1 })
-  expect((await badCount.json()).message).toBe('guest_count_out_of_range')
+    const attack = await request.post(`${REST}/rpc/potluck_update_dish`, {
+      headers: HEADERS,
+      data: { p_id: dishId, p_owner: crypto.randomUUID(), p_token: null, p_name: 'Pwned' },
+    })
+    expect(attack.status()).toBe(400)
+    expect((await attack.json()).message).toBe('not_allowed')
+  })
 })

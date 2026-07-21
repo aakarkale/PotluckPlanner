@@ -6,12 +6,11 @@
 const BASE_URL = import.meta.env.VITE_SUPABASE_URL
 const ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY
 
-// Prepended to every RPC function name. Empty for a dedicated project (the
-// canonical migration exposes list_dishes, create_dish, …). Set to `potluck_`
-// when the backend is colocated inside a shared project, where the functions
-// are namespaced potluck_list_dishes, potluck_create_dish, … to avoid
-// colliding with the host project. See supabase/colocation/README.md.
-const RPC_PREFIX = import.meta.env.VITE_RPC_PREFIX ?? ''
+// Prepended to every RPC function name. The canonical contract
+// (supabase/migrations/0002_platform.sql) namespaces the whole API as
+// potluck_* so one migration works in a dedicated OR a shared Supabase
+// project; override only if you rename the functions.
+const RPC_PREFIX = import.meta.env.VITE_RPC_PREFIX ?? 'potluck_'
 
 export class RpcError extends Error {
   constructor(
