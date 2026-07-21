@@ -56,6 +56,13 @@ delete dish, get/set guest count, verify host — is a Postgres function in
 3. Share the plain URL with guests; keep the `/?host=<secret>` link for
    yourself.
 
+> **Colocated backend:** if you can't spare a dedicated Supabase project (the
+> free tier caps you at 2), the backend can live inside an existing project
+> under private `potluck` schemas with `potluck_`-prefixed RPCs. Run
+> `supabase/colocation/potluck_in_shared_project.sql` instead of step 1's
+> migration and set `VITE_RPC_PREFIX=potluck_` in Vercel. See
+> [`supabase/colocation/README.md`](supabase/colocation/README.md).
+
 ## Where things live
 
 - Database schema + entire API: `supabase/migrations/0001_potluck.sql`
