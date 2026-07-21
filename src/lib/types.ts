@@ -20,6 +20,34 @@ export const CATEGORY_PLURAL_LABELS: Record<Category, string> = {
   other: 'Other',
 }
 
+export interface User {
+  id: string
+  email: string
+  name: string
+  createdAt: string
+}
+
+export interface PotluckEvent {
+  id: string
+  slug: string
+  name: string
+  /** ISO date (YYYY-MM-DD) or null. */
+  date: string | null
+  location: string | null
+  description: string | null
+  guestCount: number
+  isHost: boolean
+  createdAt: string
+  updatedAt: string
+}
+
+/** Event as returned by my_events — includes dashboard stats. */
+export interface PotluckEventSummary extends PotluckEvent {
+  dishCount: number
+  totalServings: number
+  unclaimedCount: number
+}
+
 export interface Dish {
   id: string
   name: string
@@ -31,7 +59,13 @@ export interface Dish {
   updatedAt: string
 }
 
-export interface Settings {
-  guestCount: number
-  updatedAt: string
+/** One poll of the event page: everything a guest or host needs. */
+export interface EventData {
+  event: PotluckEvent
+  dishes: Dish[]
+}
+
+export interface Session {
+  token: string
+  user: User
 }

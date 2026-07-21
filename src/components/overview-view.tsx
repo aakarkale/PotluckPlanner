@@ -4,12 +4,12 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { useSetGuestCount } from '@/hooks/use-potluck'
-import { CATEGORIES, CATEGORY_PLURAL_LABELS, type Dish, type Settings } from '@/lib/types'
+import { CATEGORIES, CATEGORY_PLURAL_LABELS, type Dish, type PotluckEvent } from '@/lib/types'
 import { cn } from '@/lib/utils'
 
-interface DashboardViewProps {
+interface OverviewViewProps {
+  event: PotluckEvent
   dishes: Dish[]
-  settings: Settings
 }
 
 function StatCard({
@@ -34,14 +34,14 @@ function StatCard({
   )
 }
 
-export function DashboardView({ dishes, settings }: DashboardViewProps) {
-  const setGuestCount = useSetGuestCount()
+export function OverviewView({ event, dishes }: OverviewViewProps) {
+  const setGuestCount = useSetGuestCount(event.slug)
   const [editingGuests, setEditingGuests] = useState(false)
   const [draft, setDraft] = useState('')
 
   const totalItems = dishes.length
   const totalServings = dishes.reduce((sum, d) => sum + d.servings, 0)
-  const { guestCount } = settings
+  const { guestCount } = event
   const coverage = guestCount > 0 ? Math.round((totalServings / guestCount) * 100) : null
   const shortBy = Math.max(0, guestCount - totalServings)
 
@@ -62,7 +62,7 @@ export function DashboardView({ dishes, settings }: DashboardViewProps) {
   const saveGuests = () => {
     const n = Number.parseInt(draft, 10)
     if (Number.isInteger(n) && n >= 0 && n <= 9999 && n !== guestCount) {
-      setGuestCount.mutate(n)
+      setGuestCount.mutate({ id: event.id, guestCount: n })
     }
     setEditingGuests(false)
   }
@@ -79,7 +79,7 @@ export function DashboardView({ dishes, settings }: DashboardViewProps) {
         </StatCard>
 
         <StatCard icon={Users} label="Guest Count">
-          {editingGuests ? (
+          {editingGuests && event.isHost ? (
             <form
               className="flex items-center gap-1"
               onSubmit={(e) => {
@@ -117,15 +117,17 @@ export function DashboardView({ dishes, settings }: DashboardViewProps) {
           ) : (
             <div className="flex items-center gap-1">
               <p className="text-2xl font-semibold tabular-nums">{guestCount}</p>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="text-muted-foreground size-7"
-                aria-label="Edit guest count"
-                onClick={startEditing}
-              >
-                <Pencil className="size-3.5" />
-              </Button>
+              {event.isHost && (
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="text-muted-foreground size-7"
+                  aria-label="Edit guest count"
+                  onClick={startEditing}
+                >
+                  <Pencil className="size-3.5" />
+                </Button>
+              )}
             </div>
           )}
         </StatCard>
@@ -136,7 +138,9 @@ export function DashboardView({ dishes, settings }: DashboardViewProps) {
           </p>
           <p className="text-muted-foreground mt-0.5 text-xs">
             {coverage === null
-              ? 'Set a guest count'
+              ? event.isHost
+                ? 'Set a guest count'
+                : 'No guest count yet'
               : shortBy > 0
                 ? `${shortBy} serving${shortBy === 1 ? '' : 's'} short`
                 : "Everyone's covered"}

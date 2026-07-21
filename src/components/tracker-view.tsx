@@ -29,21 +29,22 @@ import { cn } from '@/lib/utils'
 type Filter = 'all' | 'unclaimed' | Category
 
 interface TrackerViewProps {
+  slug: string
   dishes: Dish[]
   isHost: boolean
 }
 
-export function TrackerView({ dishes, isHost }: TrackerViewProps) {
+export function TrackerView({ slug, dishes, isHost }: TrackerViewProps) {
   const [filter, setFilter] = useState<Filter>('all')
   const [formOpen, setFormOpen] = useState(false)
   const [editing, setEditing] = useState<Dish | undefined>(undefined)
   const [claiming, setClaiming] = useState<Dish | null>(null)
   const [deleting, setDeleting] = useState<Dish | null>(null)
 
-  const createDish = useCreateDish()
-  const updateDish = useUpdateDish()
-  const claimDish = useClaimDish()
-  const deleteDish = useDeleteDish()
+  const createDish = useCreateDish(slug)
+  const updateDish = useUpdateDish(slug)
+  const claimDish = useClaimDish(slug)
+  const deleteDish = useDeleteDish(slug)
 
   const unclaimedCount = dishes.filter((d) => d.broughtBy === null).length
   const filtered = dishes.filter((d) => {
