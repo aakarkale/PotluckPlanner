@@ -49,3 +49,9 @@ README.md for architecture.
 - Keep dependencies lean: no supabase-js (the ~50-line `src/lib/rpc.ts` is
   the client; note the `potluck_` RPC prefix default), only the shadcn
   components actually used.
+- Two keyless third-party APIs are called from the browser: Photon
+  (`src/lib/geocode.ts`, address suggestions) and Openverse
+  (`src/lib/event-image.ts`, header artwork). Rules: no API keys ever, both
+  must fail silently to the pre-feature UI, results cached in localStorage,
+  and artwork stays `license=cc0,pdm` + `mature=false` behind a blur. E2E
+  stubs both via `page.route` — keep new tests hermetic.

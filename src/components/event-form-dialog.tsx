@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { AddressInput } from '@/components/address-input'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -12,6 +13,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import type { EventInput } from '@/lib/api'
+import { LOCATION_MAX } from '@/lib/geocode'
 import type { PotluckEvent } from '@/lib/types'
 
 interface EventFormDialogProps {
@@ -29,6 +31,9 @@ export function EventFormDialog({ open, onOpenChange, event, pending, onSubmit }
   const [location, setLocation] = useState('')
   const [description, setDescription] = useState('')
   const [guests, setGuests] = useState('20')
+  // While address suggestions are showing, Escape should dismiss them rather
+  // than the whole dialog (see AddressInput.onOpenChange).
+  const [addressListOpen, setAddressListOpen] = useState(false)
 
   useEffect(() => {
     if (open) {
@@ -58,7 +63,11 @@ export function EventFormDialog({ open, onOpenChange, event, pending, onSubmit }
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
+      <DialogContent
+        onEscapeKeyDown={(event) => {
+          if (addressListOpen) event.preventDefault()
+        }}
+      >
         <DialogHeader>
           <DialogTitle>{event ? 'Edit potluck' : 'New potluck'}</DialogTitle>
           <DialogDescription>
@@ -106,12 +115,13 @@ export function EventFormDialog({ open, onOpenChange, event, pending, onSubmit }
           </div>
           <div className="grid gap-2">
             <Label htmlFor="event-location">Location (optional)</Label>
-            <Input
+            <AddressInput
               id="event-location"
               value={location}
-              onChange={(e) => setLocation(e.target.value)}
-              placeholder="Riverside Park, table 4"
-              maxLength={120}
+              onChange={setLocation}
+              onOpenChange={setAddressListOpen}
+              placeholder="Start typing an address…"
+              maxLength={LOCATION_MAX}
             />
           </div>
           <div className="grid gap-2">
