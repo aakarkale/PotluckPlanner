@@ -20,9 +20,21 @@ let host: Page
 let guest: Page
 let shareUrl: string
 
+/** The app calls two keyless third-party APIs — a geocoder for address
+ *  suggestions and an image search for header artwork. Every test stubs both
+ *  so the suite stays hermetic; the defaults return nothing. */
+const GEOCODER = '**/photon.komoot.io/**'
+const IMAGE_API = '**/api.openverse.org/**'
+const noSuggestions = { features: [] as unknown[], type: 'FeatureCollection' }
+const noImages = { results: [] as unknown[] }
+
 test.beforeAll(async ({ browser }) => {
   hostContext = await browser.newContext()
   guestContext = await browser.newContext()
+  for (const context of [hostContext, guestContext]) {
+    await context.route(GEOCODER, (route) => route.fulfill({ json: noSuggestions }))
+    await context.route(IMAGE_API, (route) => route.fulfill({ json: noImages }))
+  }
   host = await hostContext.newPage()
   guest = await guestContext.newPage()
 })
@@ -234,6 +246,249 @@ test('deleting the potluck removes it for everyone', async () => {
 
   await guest.goto(shareUrl)
   await expect(guest.getByText("This potluck doesn't exist")).toBeVisible()
+})
+
+test.describe('address autocomplete', () => {
+  // Photon (OpenStreetMap) response shape, stubbed so the suite never depends
+  // on a live third-party geocoder.
+  const suggestionFixture = {
+    type: 'FeatureCollection',
+    features: [
+      {
+        type: 'Feature',
+        properties: {
+          osm_id: 1,
+          osm_type: 'W',
+          name: 'Riverside Park',
+          street: 'Main Street',
+          city: 'Portland',
+          state: 'Oregon',
+          postcode: '97204',
+        },
+      },
+      {
+        type: 'Feature',
+        properties: {
+          osm_id: 2,
+          osm_type: 'W',
+          housenumber: '1600',
+          street: 'Amphitheatre Parkway',
+          city: 'Mountain View',
+          state: 'California',
+          postcode: '94043',
+        },
+      },
+      {
+        // Longer than the database's 120-char location limit once joined.
+        type: 'Feature',
+        properties: {
+          osm_id: 3,
+          osm_type: 'W',
+          name: 'The Extremely Long Community Recreation Center And Banquet Facility',
+          street: '12345 Northwest Grand Boulevard Extension',
+          city: 'Beaverton',
+          state: 'Oregon',
+          postcode: '97006',
+        },
+      },
+    ],
+  }
+
+  test.beforeEach(async () => {
+    // Page-level route registered last, so it wins over the context default.
+    await host.route(GEOCODER, (route) => route.fulfill({ json: suggestionFixture }))
+  })
+
+  test.afterEach(async () => {
+    await host.unroute(GEOCODER)
+  })
+
+  test('suggests full addresses and fills the field on pick', async () => {
+    await host.goto('/dashboard')
+    await host.getByRole('button', { name: /New potluck|Create a potluck/ }).first().click()
+    await host.getByLabel('Name').fill('Autocomplete Party')
+
+    const location = host.getByLabel('Location (optional)')
+    await location.fill('riverside')
+
+    const listbox = host.getByRole('listbox', { name: 'Address suggestions' })
+    await expect(listbox).toBeVisible()
+    await expect(listbox.getByRole('option')).toHaveCount(3)
+    // Composed from the parts, not just the raw name.
+    await expect(listbox.getByRole('option').first()).toContainText(
+      'Riverside Park, Main Street, Portland, Oregon, 97204',
+    )
+
+    await listbox.getByRole('option').nth(1).click()
+    await expect(location).toHaveValue('1600 Amphitheatre Parkway, Mountain View, California, 94043')
+    await expect(listbox).toBeHidden()
+  })
+
+  test('keyboard navigation selects without submitting the form', async () => {
+    // Park the cursor away from the list: an option rendering under a
+    // stationary pointer fires mouseenter and would pre-highlight it.
+    await host.mouse.move(0, 0)
+
+    const location = host.getByLabel('Location (optional)')
+    await location.fill('riverside')
+    const options = host.getByRole('listbox', { name: 'Address suggestions' }).getByRole('option')
+    await expect(options.first()).toBeVisible()
+
+    await location.press('ArrowDown')
+    await expect(options.nth(0)).toHaveAttribute('aria-selected', 'true')
+    await location.press('ArrowDown')
+    await expect(options.nth(1)).toHaveAttribute('aria-selected', 'true')
+    await location.press('Enter')
+
+    // Enter took the highlighted suggestion; it must NOT have submitted.
+    await expect(location).toHaveValue('1600 Amphitheatre Parkway, Mountain View, California, 94043')
+    await expect(host.getByRole('dialog')).toBeVisible()
+    await expect(host.getByRole('listbox', { name: 'Address suggestions' })).toBeHidden()
+
+    // Escape closes the list but leaves the dialog open. Assert on data-state,
+    // not visibility: a dismissed dialog stays mounted through its exit
+    // animation and would still look "visible" for a moment.
+    await location.fill('main street')
+    await expect(host.getByRole('listbox', { name: 'Address suggestions' })).toBeVisible()
+    await location.press('Escape')
+    await expect(host.getByRole('listbox', { name: 'Address suggestions' })).toBeHidden()
+    await expect(host.getByRole('dialog')).toHaveAttribute('data-state', 'open')
+  })
+
+  test('long suggestions are clamped to what the database accepts', async () => {
+    const location = host.getByLabel('Location (optional)')
+    // Distinct from the previous test's query: re-filling an identical value
+    // fires no change event, so the list would never reopen.
+    await location.fill('grand boulevard')
+    const listbox = host.getByRole('listbox', { name: 'Address suggestions' })
+    await listbox.getByRole('option').nth(2).click()
+
+    const picked = await location.inputValue()
+    expect(picked.length).toBeGreaterThan(0)
+    expect(picked.length).toBeLessThanOrEqual(120)
+
+    // The clamped value round-trips through the API.
+    await host.getByRole('button', { name: 'Create potluck' }).click()
+    await expect(host).toHaveURL(/\/p\/[a-z0-9]{12}$/)
+    await expect(host.getByText(picked)).toBeVisible()
+
+    await host.getByLabel('Delete potluck').click()
+    await host.getByRole('alertdialog').getByRole('button', { name: 'Delete potluck' }).click()
+    await expect(host).toHaveURL('/dashboard')
+  })
+
+  test('opening the edit dialog never geocodes the saved address', async () => {
+    const sent: string[] = []
+    await host.unroute(GEOCODER)
+    await host.route(GEOCODER, (route) => {
+      sent.push(new URL(route.request().url()).searchParams.get('q') ?? '')
+      route.fulfill({ json: suggestionFixture })
+    })
+
+    await host.goto('/dashboard')
+    await host.getByRole('button', { name: /New potluck|Create a potluck/ }).first().click()
+    await host.getByLabel('Name').fill('Edit Prefill Party')
+    await host.getByLabel('Location (optional)').fill('amphitheatre')
+    const listbox = host.getByRole('listbox', { name: 'Address suggestions' })
+    await listbox.getByRole('option').nth(1).click()
+    await host.getByRole('button', { name: 'Create potluck' }).click()
+    await expect(host).toHaveURL(/\/p\/[a-z0-9]{12}$/)
+    // The typed text is what reaches the geocoder — nothing else.
+    expect(sent).toEqual(['amphitheatre'])
+
+    sent.length = 0
+    await host.getByLabel('Edit potluck details').click()
+    await expect(host.getByLabel('Location (optional)')).toHaveValue(/Amphitheatre Parkway/)
+    // Well past the debounce: a prefilled value must not be looked up, and the
+    // list must not appear over the fields below it.
+    await host.waitForTimeout(900)
+    expect(sent).toEqual([])
+    await expect(listbox).toBeHidden()
+
+    // Typing still works normally from there.
+    await host.getByLabel('Location (optional)').fill('riverside')
+    await expect(listbox).toBeVisible()
+    expect(sent).toEqual(['riverside'])
+
+    // Escape dismisses the list (which overlays the footer) and leaves the
+    // dialog open; a second one closes the dialog.
+    await host.getByLabel('Location (optional)').press('Escape')
+    await expect(listbox).toBeHidden()
+    await expect(host.getByRole('dialog')).toHaveAttribute('data-state', 'open')
+    await host.getByRole('button', { name: 'Cancel' }).click()
+    await expect(host.getByRole('dialog')).toHaveCount(0)
+    await host.getByLabel('Delete potluck').click()
+    await host.getByRole('alertdialog').getByRole('button', { name: 'Delete potluck' }).click()
+    await expect(host).toHaveURL('/dashboard')
+  })
+
+  test('a failing geocoder never blocks free-typed locations', async () => {
+    await host.unroute(GEOCODER)
+    await host.route(GEOCODER, (route) => route.abort('failed'))
+
+    await host.getByRole('button', { name: /New potluck|Create a potluck/ }).first().click()
+    await host.getByLabel('Name').fill('Offline Geocoder Party')
+    await host.getByLabel('Location (optional)').fill("Dana's backyard, past the gate")
+    await expect(host.getByRole('listbox', { name: 'Address suggestions' })).toBeHidden()
+
+    await host.getByRole('button', { name: 'Create potluck' }).click()
+    await expect(host).toHaveURL(/\/p\/[a-z0-9]{12}$/)
+    await expect(host.getByText("Dana's backyard, past the gate")).toBeVisible()
+
+    await host.getByLabel('Delete potluck').click()
+    await host.getByRole('alertdialog').getByRole('button', { name: 'Delete potluck' }).click()
+    await expect(host).toHaveURL('/dashboard')
+  })
+})
+
+test.describe('header artwork', () => {
+  // 1x1 transparent GIF — enough to prove the backdrop renders and loads.
+  const PIXEL = 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw=='
+
+  test('derives a themed image query from the name and blurs it behind the header', async () => {
+    const queries: string[] = []
+    await host.route(IMAGE_API, (route) => {
+      queries.push(new URL(route.request().url()).searchParams.get('q') ?? '')
+      route.fulfill({ json: { results: [{ thumbnail: PIXEL }] } })
+    })
+
+    await host.goto('/dashboard')
+    // Earlier tests ran against the "no results" stub, which caches the miss.
+    await host.evaluate(() => localStorage.removeItem('potluck-image-cache'))
+    await host.getByRole('button', { name: /New potluck|Create a potluck/ }).first().click()
+    await host.getByLabel('Name').fill('Friendsgiving 2026')
+    await host.getByRole('button', { name: 'Create potluck' }).click()
+    await expect(host).toHaveURL(/\/p\/[a-z0-9]{12}$/)
+
+    // The image must actually load and fade in, not merely be requested.
+    const backdrop = host.getByTestId('header-backdrop')
+    await expect(backdrop.locator('img')).toHaveClass(/opacity-40/)
+    // "Friendsgiving" maps to a curated query; the raw event name never leaves.
+    expect(queries).toEqual(['thanksgiving dinner table'])
+    // Purely decorative: hidden from the accessibility tree.
+    await expect(backdrop).toHaveAttribute('aria-hidden', 'true')
+    await expect(host.getByRole('heading', { name: 'Friendsgiving 2026' })).toBeVisible()
+
+    // The whole point of caching: the 1.5s event poll must not re-request it.
+    await host.waitForTimeout(5000)
+    expect(queries).toHaveLength(1)
+
+    await host.unroute(IMAGE_API)
+  })
+
+  test('header renders plain when the image service has nothing', async () => {
+    // Drop the cached hit from the previous test, then fall back to the
+    // context-level stub, which returns no results.
+    await host.evaluate(() => localStorage.removeItem('potluck-image-cache'))
+    await host.reload()
+    await expect(host.getByRole('heading', { name: 'Friendsgiving 2026' })).toBeVisible()
+    // Not merely hidden — never rendered at all.
+    await expect(host.getByTestId('header-backdrop')).toHaveCount(0)
+
+    await host.getByLabel('Delete potluck').click()
+    await host.getByRole('alertdialog').getByRole('button', { name: 'Delete potluck' }).click()
+    await expect(host).toHaveURL('/dashboard')
+  })
 })
 
 test.describe('API hardening (wire-level probes)', () => {

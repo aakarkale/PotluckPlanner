@@ -13,6 +13,7 @@ import {
 import { useState } from 'react'
 import { EventFormDialog } from '@/components/event-form-dialog'
 import { Header } from '@/components/header'
+import { HeaderBackdrop } from '@/components/header-backdrop'
 import { OverviewView } from '@/components/overview-view'
 import { TrackerView } from '@/components/tracker-view'
 import {
@@ -208,8 +209,9 @@ export default function EventPage({ slug }: { slug: string }) {
         </main>
       ) : (
         <main className="mx-auto max-w-2xl px-4 pt-4 pb-12">
-          <Card className="mb-4 gap-2 py-4">
-            <div className="flex items-start justify-between gap-2 px-4">
+          <Card className="relative mb-4 gap-2 overflow-hidden py-4">
+            <HeaderBackdrop name={query.data.event.name} />
+            <div className="relative flex items-start justify-between gap-2 px-4">
               <div className="min-w-0">
                 <h1 className="text-lg leading-tight font-semibold tracking-tight">
                   {query.data.event.name}
@@ -232,7 +234,9 @@ export default function EventPage({ slug }: { slug: string }) {
               {query.data.event.isHost && <HostControls event={query.data.event} />}
             </div>
             {query.data.event.description && (
-              <p className="text-muted-foreground px-4 text-sm">{query.data.event.description}</p>
+              <p className="text-muted-foreground relative px-4 text-sm">
+                {query.data.event.description}
+              </p>
             )}
           </Card>
 

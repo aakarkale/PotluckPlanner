@@ -61,6 +61,41 @@ ids. Convenience-grade, not adversary-safe — by design.
   unclaimed dish (race-safe: first write wins).
 - Abuse fuses: 25 events per account, 200 dishes per event.
 
+### Third-party niceties (both keyless, both optional)
+
+Two small conveniences call public APIs straight from the browser. Neither
+needs an API key or a billing account — that is why these providers were
+picked over Google Places / Unsplash — and **both fail silently**, so if
+either is slow, rate-limited, or blocked, the app behaves exactly as it did
+before the feature existed.
+
+| Feature | Provider | What is sent | Fallback |
+| --- | --- | --- | --- |
+| Address autocomplete in the potluck form | [Photon](https://photon.komoot.io) (OpenStreetMap) | what the host types in Location | plain free-text field |
+| Blurred header artwork on the event page | [Openverse](https://openverse.org) | a search term derived from the potluck's name | header renders plain |
+
+Notes:
+
+- Suggestions are a convenience layer only. The Location field stays a plain
+  text input, so "Dana's backyard, past the gate" works fine, and picked
+  addresses are clamped to the 120 chars the database accepts.
+- Artwork is restricted to `license=cc0,pdm` (public domain / CC0, so no
+  attribution is owed for a decorative background) with Openverse's
+  `mature=false` safe-search, and is blurred under a scrim so it reads as a
+  wash of colour, not a photo.
+- **Only a fixed vocabulary is ever sent.** Known occasions ("Friendsgiving",
+  "BBQ", "Diwali") map to a curated query and anything else falls back to a
+  generic one — the host's own words never leave the app, because every
+  *guest's* browser runs this lookup and a potluck name can be personal.
+- Artwork lookups are cached in `localStorage` (a week for hits, an hour for
+  misses, so an outage doesn't blank the header for days) and keyed by the
+  derived query, so the event page's 1.5 s poll never re-requests them.
+  Address lookups are not cached — they are debounced per keystroke and only
+  run while the host is typing.
+- Swapping providers means reimplementing `searchAddresses` in
+  `src/lib/geocode.ts` or `fetchEventImage` in `src/lib/event-image.ts` —
+  nothing else touches them.
+
 ## Routes
 
 | Route        | Who    | What                                             |
@@ -105,4 +140,6 @@ philosophy as the 40-line RPC client. `vercel.json` rewrites all paths to
 - Auth hooks: `src/hooks/use-auth.ts`; data hooks: `src/hooks/use-potluck.ts`
 - Pages: `src/pages/landing.tsx`, `auth.tsx`, `dashboard.tsx`, `event.tsx`
 - Event views: `src/components/tracker-view.tsx`, `overview-view.tsx`
+- Address autocomplete: `src/lib/geocode.ts`, `src/components/address-input.tsx`
+- Header artwork: `src/lib/event-image.ts`, `src/components/header-backdrop.tsx`
 - Theme tokens (light + dark): `src/index.css`
