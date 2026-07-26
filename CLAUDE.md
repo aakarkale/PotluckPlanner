@@ -51,7 +51,10 @@ README.md for architecture.
   components actually used.
 - Two keyless third-party APIs are called from the browser: Photon
   (`src/lib/geocode.ts`, address suggestions) and Openverse
-  (`src/lib/event-image.ts`, header artwork). Rules: no API keys ever, both
-  must fail silently to the pre-feature UI, results cached in localStorage,
-  and artwork stays `license=cc0,pdm` + `mature=false` behind a blur. E2E
-  stubs both via `page.route` — keep new tests hermetic.
+  (`src/lib/event-image.ts`, header artwork). Rules: no API keys ever; both
+  fail silently to the pre-feature UI; both bound by an AbortSignal timeout;
+  artwork stays `license=cc0,pdm` + `mature=false` behind a blur, is cached in
+  localStorage, and only ever sends the curated vocabulary in `THEMES` — never
+  the host's own event-name words. Address lookups run only while the host is
+  actively typing (never on a prefilled value). E2E stubs both via
+  `page.route` — keep new tests hermetic.

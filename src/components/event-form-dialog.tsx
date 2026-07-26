@@ -37,6 +37,9 @@ export function EventFormDialog({ open, onOpenChange, event, pending, onSubmit }
 
   useEffect(() => {
     if (open) {
+      // Reset with the rest of the form: a stale `true` here would keep
+      // swallowing Escape after the dialog was closed with the list open.
+      setAddressListOpen(false)
       setName(event?.name ?? '')
       setDate(event?.date ?? '')
       setLocation(event?.location ?? '')

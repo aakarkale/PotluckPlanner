@@ -81,11 +81,17 @@ Notes:
   addresses are clamped to the 120 chars the database accepts.
 - Artwork is restricted to `license=cc0,pdm` (public domain / CC0, so no
   attribution is owed for a decorative background) with Openverse's
-  `mature=false` safe-search. Known occasions ("Friendsgiving", "BBQ",
-  "Diwali") map to a curated query rather than the raw event name; the image
-  is blurred under a scrim, so it reads as a wash of colour, not a photo.
-- Results are cached in `localStorage` (a week for hits, an hour for misses)
-  so the event page's 1.5 s poll never re-requests them.
+  `mature=false` safe-search, and is blurred under a scrim so it reads as a
+  wash of colour, not a photo.
+- **Only a fixed vocabulary is ever sent.** Known occasions ("Friendsgiving",
+  "BBQ", "Diwali") map to a curated query and anything else falls back to a
+  generic one — the host's own words never leave the app, because every
+  *guest's* browser runs this lookup and a potluck name can be personal.
+- Artwork lookups are cached in `localStorage` (a week for hits, an hour for
+  misses, so an outage doesn't blank the header for days) and keyed by the
+  derived query, so the event page's 1.5 s poll never re-requests them.
+  Address lookups are not cached — they are debounced per keystroke and only
+  run while the host is typing.
 - Swapping providers means reimplementing `searchAddresses` in
   `src/lib/geocode.ts` or `fetchEventImage` in `src/lib/event-image.ts` —
   nothing else touches them.

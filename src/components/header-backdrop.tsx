@@ -34,12 +34,14 @@ export function HeaderBackdrop({ name }: { name: string }) {
         className={cn(
           // scale-110 hides the soft edges the blur leaves behind.
           'size-full scale-110 object-cover blur-2xl transition-opacity duration-700',
-          loaded ? 'opacity-55 dark:opacity-40' : 'opacity-0',
+          loaded ? 'opacity-40 dark:opacity-30' : 'opacity-0',
         )}
       />
-      {/* Opaque where the name, date, and location sit; thins out to the
-          right so the colour still reads as a wash across the card. */}
-      <div className="from-card via-card/85 to-card/25 absolute inset-0 bg-gradient-to-r" />
+      {/* Opaque where the name, date, and location sit, and still ~70% card
+          colour at the thin end. Muted text (the date/location row and the
+          notes) has to clear 4.5:1 over the *worst* pixel of a blurred photo,
+          not the average — so the scrim never thins past that. */}
+      <div className="from-card via-card/95 to-card/70 absolute inset-0 bg-gradient-to-r" />
     </div>
   )
 }

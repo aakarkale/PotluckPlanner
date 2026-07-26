@@ -377,6 +377,51 @@ test.describe('address autocomplete', () => {
     await expect(host).toHaveURL('/dashboard')
   })
 
+  test('opening the edit dialog never geocodes the saved address', async () => {
+    const sent: string[] = []
+    await host.unroute(GEOCODER)
+    await host.route(GEOCODER, (route) => {
+      sent.push(new URL(route.request().url()).searchParams.get('q') ?? '')
+      route.fulfill({ json: suggestionFixture })
+    })
+
+    await host.goto('/dashboard')
+    await host.getByRole('button', { name: /New potluck|Create a potluck/ }).first().click()
+    await host.getByLabel('Name').fill('Edit Prefill Party')
+    await host.getByLabel('Location (optional)').fill('amphitheatre')
+    const listbox = host.getByRole('listbox', { name: 'Address suggestions' })
+    await listbox.getByRole('option').nth(1).click()
+    await host.getByRole('button', { name: 'Create potluck' }).click()
+    await expect(host).toHaveURL(/\/p\/[a-z0-9]{12}$/)
+    // The typed text is what reaches the geocoder — nothing else.
+    expect(sent).toEqual(['amphitheatre'])
+
+    sent.length = 0
+    await host.getByLabel('Edit potluck details').click()
+    await expect(host.getByLabel('Location (optional)')).toHaveValue(/Amphitheatre Parkway/)
+    // Well past the debounce: a prefilled value must not be looked up, and the
+    // list must not appear over the fields below it.
+    await host.waitForTimeout(900)
+    expect(sent).toEqual([])
+    await expect(listbox).toBeHidden()
+
+    // Typing still works normally from there.
+    await host.getByLabel('Location (optional)').fill('riverside')
+    await expect(listbox).toBeVisible()
+    expect(sent).toEqual(['riverside'])
+
+    // Escape dismisses the list (which overlays the footer) and leaves the
+    // dialog open; a second one closes the dialog.
+    await host.getByLabel('Location (optional)').press('Escape')
+    await expect(listbox).toBeHidden()
+    await expect(host.getByRole('dialog')).toHaveAttribute('data-state', 'open')
+    await host.getByRole('button', { name: 'Cancel' }).click()
+    await expect(host.getByRole('dialog')).toHaveCount(0)
+    await host.getByLabel('Delete potluck').click()
+    await host.getByRole('alertdialog').getByRole('button', { name: 'Delete potluck' }).click()
+    await expect(host).toHaveURL('/dashboard')
+  })
+
   test('a failing geocoder never blocks free-typed locations', async () => {
     await host.unroute(GEOCODER)
     await host.route(GEOCODER, (route) => route.abort('failed'))
@@ -415,12 +460,18 @@ test.describe('header artwork', () => {
     await host.getByRole('button', { name: 'Create potluck' }).click()
     await expect(host).toHaveURL(/\/p\/[a-z0-9]{12}$/)
 
-    await expect(host.getByTestId('header-backdrop')).toBeVisible()
-    // "Friendsgiving" maps to a curated query, not the raw event name.
-    expect(queries).toContain('thanksgiving dinner table')
+    // The image must actually load and fade in, not merely be requested.
+    const backdrop = host.getByTestId('header-backdrop')
+    await expect(backdrop.locator('img')).toHaveClass(/opacity-40/)
+    // "Friendsgiving" maps to a curated query; the raw event name never leaves.
+    expect(queries).toEqual(['thanksgiving dinner table'])
     // Purely decorative: hidden from the accessibility tree.
-    await expect(host.getByTestId('header-backdrop')).toHaveAttribute('aria-hidden', 'true')
+    await expect(backdrop).toHaveAttribute('aria-hidden', 'true')
     await expect(host.getByRole('heading', { name: 'Friendsgiving 2026' })).toBeVisible()
+
+    // The whole point of caching: the 1.5s event poll must not re-request it.
+    await host.waitForTimeout(5000)
+    expect(queries).toHaveLength(1)
 
     await host.unroute(IMAGE_API)
   })
@@ -431,7 +482,8 @@ test.describe('header artwork', () => {
     await host.evaluate(() => localStorage.removeItem('potluck-image-cache'))
     await host.reload()
     await expect(host.getByRole('heading', { name: 'Friendsgiving 2026' })).toBeVisible()
-    await expect(host.getByTestId('header-backdrop')).toBeHidden()
+    // Not merely hidden — never rendered at all.
+    await expect(host.getByTestId('header-backdrop')).toHaveCount(0)
 
     await host.getByLabel('Delete potluck').click()
     await host.getByRole('alertdialog').getByRole('button', { name: 'Delete potluck' }).click()

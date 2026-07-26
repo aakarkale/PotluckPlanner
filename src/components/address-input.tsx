@@ -5,6 +5,8 @@ import { searchAddresses, type AddressSuggestion } from '@/lib/geocode'
 import { cn } from '@/lib/utils'
 
 const DEBOUNCE_MS = 300
+/** Roughly the list's max height; below this we flip it above the input. */
+const LIST_SPACE_PX = 240
 
 interface AddressInputProps {
   id?: string
@@ -15,8 +17,8 @@ interface AddressInputProps {
   /**
    * Fired when the suggestion list opens or closes. A surrounding dialog uses
    * this to let Escape dismiss the list first instead of the whole dialog —
-   * React's stopPropagation cannot beat Radix's document-level key handler,
-   * so the dialog has to opt out via onEscapeKeyDown.
+   * React's stopPropagation cannot beat Radix's document-level key handler, so
+   * the dialog has to opt out via onEscapeKeyDown.
    */
   onOpenChange?: (open: boolean) => void
 }
@@ -27,6 +29,11 @@ interface AddressInputProps {
  * Suggestions are a convenience layer only: the field stays a plain text
  * input, so a host can type "Dana's backyard" and never touch the list. If
  * the geocoder is slow, blocked, or offline, the list simply stays empty.
+ *
+ * Two rules keep it from acting on its own:
+ *   * nothing is requested until the host actually types, so opening the edit
+ *     dialog never geocodes the saved address or pops the list open; and
+ *   * a late response cannot re-open a list the host already dismissed.
  */
 export function AddressInput({
   id,
@@ -40,10 +47,16 @@ export function AddressInput({
   const [open, setOpen] = useState(false)
   const [loading, setLoading] = useState(false)
   const [highlight, setHighlight] = useState(-1)
+  const [dropUp, setDropUp] = useState(false)
 
   const listboxId = useId()
-  // Set when the value change came from picking a suggestion, so we don't
-  // immediately re-query for the text we just inserted.
+  const inputRef = useRef<HTMLInputElement>(null)
+  const listRef = useRef<HTMLUListElement>(null)
+  /** The host has typed here; a prefilled value alone must not trigger a search. */
+  const typed = useRef(false)
+  /** The host closed the list (Escape/blur); a pending response must not reopen it. */
+  const dismissed = useRef(false)
+  /** Set when the value change came from picking a suggestion. */
   const skipSearch = useRef(false)
 
   useEffect(() => {
@@ -52,7 +65,7 @@ export function AddressInput({
       setLoading(false)
       return
     }
-    if (value.trim().length < 3) {
+    if (!typed.current || value.trim().length < 3) {
       setSuggestions([])
       setLoading(false)
       return
@@ -66,7 +79,10 @@ export function AddressInput({
         setSuggestions(results)
         setHighlight(-1)
         setLoading(false)
-        if (results.length > 0) setOpen(true)
+        // Don't resurrect a list the host has already dismissed or walked away
+        // from while this request was in flight.
+        const focused = document.activeElement === inputRef.current
+        if (results.length > 0 && !dismissed.current && focused) setOpen(true)
       })
     }, DEBOUNCE_MS)
 
@@ -79,19 +95,38 @@ export function AddressInput({
     }
   }, [value])
 
-  const select = (suggestion: AddressSuggestion) => {
-    skipSearch.current = true
-    onChange(suggestion.label)
-    setOpen(false)
-    setSuggestions([])
-    setHighlight(-1)
-  }
-
   const isOpen = open && suggestions.length > 0
 
   useEffect(() => {
     onOpenChange?.(isOpen)
   }, [isOpen, onOpenChange])
+
+  // The dialog keeps its own copy of this flag; make sure unmounting clears it,
+  // or Escape stays swallowed the next time the dialog opens.
+  useEffect(() => {
+    return () => onOpenChange?.(false)
+  }, [onOpenChange])
+
+  // Keep the highlighted option inside the scroll container.
+  useEffect(() => {
+    if (highlight < 0) return
+    listRef.current?.children[highlight]?.scrollIntoView({ block: 'nearest' })
+  }, [highlight])
+
+  const close = () => {
+    dismissed.current = true
+    setOpen(false)
+  }
+
+  const select = (suggestion: AddressSuggestion) => {
+    // Only guard the next effect run if the value actually changes — otherwise
+    // the flag survives and would swallow the host's next real search.
+    if (suggestion.label !== value) skipSearch.current = true
+    onChange(suggestion.label)
+    setOpen(false)
+    setSuggestions([])
+    setHighlight(-1)
+  }
 
   const onKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
     if (!isOpen) return
@@ -107,24 +142,43 @@ export function AddressInput({
       event.preventDefault()
       select(suggestions[highlight])
     } else if (event.key === 'Escape') {
-      // Close the list, but keep the surrounding dialog open.
+      // Close the list; the dialog opts out of its own Escape via onOpenChange.
       event.preventDefault()
-      event.stopPropagation()
-      setOpen(false)
+      close()
     }
   }
+
+  const status = loading
+    ? 'Searching addresses'
+    : isOpen
+      ? `${suggestions.length} address ${suggestions.length === 1 ? 'suggestion' : 'suggestions'} available`
+      : ''
 
   return (
     <div className="relative">
       <Input
+        ref={inputRef}
         id={id}
         value={value}
+        // pr-9 is unconditional so the text doesn't shift when the spinner shows.
+        className="pr-9"
         onChange={(event) => {
+          typed.current = true
+          dismissed.current = false
+          skipSearch.current = false
+          setHighlight(-1)
           onChange(event.target.value)
+          const rect = inputRef.current?.getBoundingClientRect()
+          if (rect) {
+            // On a phone the keyboard eats the bottom half of the screen;
+            // open upward when there isn't room below.
+            const viewport = window.visualViewport?.height ?? window.innerHeight
+            setDropUp(viewport - rect.bottom < LIST_SPACE_PX && rect.top > viewport - rect.bottom)
+          }
           setOpen(true)
         }}
         onKeyDown={onKeyDown}
-        onBlur={() => setOpen(false)}
+        onBlur={close}
         placeholder={placeholder}
         maxLength={maxLength}
         autoComplete="off"
@@ -139,13 +193,18 @@ export function AddressInput({
       {loading && (
         <Loader2 className="text-muted-foreground pointer-events-none absolute top-2.5 right-3 size-4 animate-spin" />
       )}
+      <span role="status" aria-live="polite" className="sr-only">
+        {status}
+      </span>
 
       <ul
+        ref={listRef}
         id={listboxId}
         role="listbox"
         aria-label="Address suggestions"
         className={cn(
-          'bg-popover text-popover-foreground absolute top-full right-0 left-0 z-50 mt-1 max-h-56 overflow-y-auto rounded-md border p-1 shadow-md',
+          'bg-popover text-popover-foreground absolute right-0 left-0 z-50 max-h-56 overflow-y-auto rounded-md border p-1 shadow-md',
+          dropUp ? 'bottom-full mb-1' : 'top-full mt-1',
           !isOpen && 'hidden',
         )}
       >

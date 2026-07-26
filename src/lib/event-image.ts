@@ -10,6 +10,8 @@
 // than a photo; a miss looks like texture, not a wrong picture.
 
 const ENDPOINT = 'https://api.openverse.org/v1/images/'
+/** A hung request must not hold the query pending forever. */
+const TIMEOUT_MS = 6000
 const CACHE_KEY = 'potluck-image-cache'
 /** A found image is stable, so hold it for a week. */
 const HIT_TTL_MS = 7 * 24 * 60 * 60 * 1000
@@ -23,64 +25,58 @@ const MISS_TTL_MS = 60 * 60 * 1000
  * whatever the index returns for a raw event name.
  */
 const THEMES: [RegExp, string][] = [
-  [/thanksgiving|friendsgiving/, 'thanksgiving dinner table'],
-  [/christmas|xmas|holiday/, 'christmas dinner table'],
-  [/hanukkah|chanukah/, 'hanukkah latkes'],
-  [/diwali/, 'diwali sweets'],
-  [/lunar new year|chinese new year/, 'lunar new year feast'],
-  [/eid|iftar|ramadan/, 'iftar feast table'],
-  [/easter/, 'easter brunch table'],
-  [/halloween|spooky/, 'halloween pumpkin treats'],
-  [/new year/, 'new year party food'],
-  [/birthday/, 'birthday cake'],
-  [/baby shower/, 'dessert table'],
-  [/housewarming|dinner party/, 'dinner party table'],
-  [/bbq|barbecue|barbeque|cookout|grill/, 'barbecue grilled food'],
-  [/picnic/, 'picnic blanket food'],
-  [/brunch/, 'brunch table spread'],
-  [/breakfast|pancake/, 'breakfast spread'],
-  [/taco|mexican/, 'tacos'],
-  [/pizza/, 'pizza'],
-  [/pasta|italian/, 'pasta dish'],
-  [/sushi|japanese/, 'sushi platter'],
-  [/curry|indian/, 'indian curry spread'],
-  [/soup|chili|stew/, 'soup pot'],
-  [/dessert|bake|cookie|cake/, 'dessert table'],
-  [/vegan|vegetarian|salad/, 'vegetable platter'],
-  [/game day|super bowl|tailgate|watch party/, 'game day snacks'],
-  [/office|work|team|company/, 'office party food'],
-  [/camp|bonfire|campfire/, 'campfire cooking'],
-  [/garden|backyard/, 'garden party table'],
-  [/summer/, 'summer picnic food'],
-  [/winter/, 'winter comfort food'],
+  [/\b(thanksgiving|friendsgiving)\b/, 'thanksgiving dinner table'],
+  [/\b(christmas|xmas|holiday)\b/, 'christmas dinner table'],
+  [/\b(hanukkah|chanukah)\b/, 'hanukkah latkes'],
+  [/\bdiwali\b/, 'diwali sweets'],
+  [/\b(lunar|chinese) new year\b/, 'lunar new year feast'],
+  [/\b(eid|iftar|ramadan)\b/, 'iftar feast table'],
+  [/\beaster\b/, 'easter brunch table'],
+  [/\b(halloween|spooky)\b/, 'halloween pumpkin treats'],
+  [/\bnew year\b/, 'new year party food'],
+  [/\bbirthday\b/, 'birthday cake'],
+  [/\bbaby shower\b/, 'dessert table'],
+  [/\b(housewarming|dinner party)\b/, 'dinner party table'],
+  [/\b(bbq|barbecue|barbeque|cookout|grill)\b/, 'barbecue grilled food'],
+  [/\bpicnic\b/, 'picnic blanket food'],
+  [/\bbrunch\b/, 'brunch table spread'],
+  [/\b(breakfast|pancakes?)\b/, 'breakfast spread'],
+  [/\b(tacos?|mexican)\b/, 'tacos'],
+  [/\bpizza\b/, 'pizza'],
+  [/\b(pasta|italian)\b/, 'pasta dish'],
+  [/\b(sushi|japanese)\b/, 'sushi platter'],
+  [/\b(curry|indian)\b/, 'indian curry spread'],
+  [/\b(soup|chili|stew)\b/, 'soup pot'],
+  [/\b(dessert|bake|baking|cookies?|cake)\b/, 'dessert table'],
+  [/\b(vegan|vegetarian|salad)\b/, 'vegetable platter'],
+  [/\b(game day|super bowl|tailgate|watch party)\b/, 'game day snacks'],
+  [/\b(office|work|team|company)\b/, 'office party food'],
+  [/\b(camp|camping|bonfire|campfire)\b/, 'campfire cooking'],
+  [/\b(garden|backyard)\b/, 'garden party table'],
+  [/\bsummer\b/, 'summer picnic food'],
+  [/\bwinter\b/, 'winter comfort food'],
 ]
 
-/** Words that carry no visual meaning on their own. */
-const FILLER =
-  /\b(potluck|party|the|a|an|of|at|for|and|with|our|my|annual|\d{1,4}(st|nd|rd|th)?|v\d+)\b/g
+/** Used whenever the name matches no theme. */
+const GENERIC_QUERY = 'potluck table food'
 
 /**
  * Builds the image search query for an event name.
- * Pure and exported for tests. Returns null when there is nothing to go on.
+ *
+ * Only the fixed vocabulary above is ever sent to Openverse. An unmatched name
+ * falls back to a generic query rather than forwarding the host's own words:
+ * every guest's browser performs this lookup, and a potluck name can be
+ * personal ("Sam's chemo support dinner") in a way that should not leave the
+ * app. Pure and exported for tests.
  */
-export function imageQueryFor(name: string): string | null {
+export function imageQueryFor(name: string): string {
   const normalized = name.toLowerCase().trim()
-  if (!normalized) return null
+  if (!normalized) return GENERIC_QUERY
 
   for (const [pattern, query] of THEMES) {
     if (pattern.test(normalized)) return query
   }
-
-  // Fall back to the distinctive words of the name, anchored with "food" so a
-  // generic name still lands on something table-shaped.
-  const words = normalized
-    .replace(FILLER, ' ')
-    .replace(/[^a-z\s]/g, ' ')
-    .split(/\s+/)
-    .filter((word) => word.length > 2)
-    .slice(0, 3)
-
-  return words.length > 0 ? `${words.join(' ')} food` : 'potluck table food'
+  return GENERIC_QUERY
 }
 
 interface CacheEntry {
@@ -90,7 +86,12 @@ interface CacheEntry {
 
 function readCache(): Record<string, CacheEntry> {
   try {
-    return JSON.parse(localStorage.getItem(CACHE_KEY) ?? '{}') as Record<string, CacheEntry>
+    const parsed: unknown = JSON.parse(localStorage.getItem(CACHE_KEY) ?? '{}')
+    // Anything can end up under this key (another tab, a corrupted write), so
+    // only trust a plain object — indexing a string or array would throw.
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, CacheEntry>)
+      : {}
   } catch {
     return {}
   }
@@ -109,26 +110,28 @@ function writeCache(query: string, url: string | null) {
 }
 
 /**
- * Resolves a background image URL for an event name.
+ * Resolves a background image URL for a query from `imageQueryFor`.
  * Never throws: any failure resolves to null and the header renders plain.
  */
 export async function fetchEventImage(
-  name: string,
+  query: string,
   signal?: AbortSignal,
 ): Promise<string | null> {
-  const query = imageQueryFor(name)
   if (!query) return null
 
-  const cached = readCache()[query]
-  if (cached && Date.now() - cached.at < (cached.url ? HIT_TTL_MS : MISS_TTL_MS)) {
-    return cached.url
-  }
-
   try {
+    const cached = readCache()[query]
+    if (cached && Date.now() - cached.at < (cached.url ? HIT_TTL_MS : MISS_TTL_MS)) {
+      return cached.url
+    }
+
     const url =
       `${ENDPOINT}?q=${encodeURIComponent(query)}` +
       '&license=cc0,pdm&mature=false&page_size=3&size=medium'
-    const res = await fetch(url, { signal })
+    const timeout = AbortSignal.timeout(TIMEOUT_MS)
+    const res = await fetch(url, {
+      signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+    })
     if (!res.ok) return null
 
     const body = (await res.json()) as {

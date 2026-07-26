@@ -64,6 +64,14 @@ export function formatFeature(properties: PhotonProperties): string {
 }
 
 const ENDPOINT = 'https://photon.komoot.io/api/'
+/** A hung connection must not leave the spinner running forever. */
+const TIMEOUT_MS = 6000
+
+/** Caller's signal, additionally bounded by TIMEOUT_MS. */
+function withTimeout(signal?: AbortSignal): AbortSignal {
+  const timeout = AbortSignal.timeout(TIMEOUT_MS)
+  return signal ? AbortSignal.any([signal, timeout]) : timeout
+}
 
 /**
  * Looks up address suggestions for a partial query.
@@ -79,7 +87,7 @@ export async function searchAddresses(
 
   try {
     const url = `${ENDPOINT}?q=${encodeURIComponent(q)}&limit=5&lang=en`
-    const res = await fetch(url, { signal })
+    const res = await fetch(url, { signal: withTimeout(signal) })
     if (!res.ok) return []
 
     const body = (await res.json()) as { features?: { properties?: PhotonProperties }[] }
